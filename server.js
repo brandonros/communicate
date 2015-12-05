@@ -23,42 +23,28 @@ function calculate_patch(old_store, new_store) {
 	return diffpatcher.diff(old_store, new_store);
 }
 
-function store_patch(old_hash, new_hash, patch) {
-	return cache.set('patch:' + old_hash + ':' + new_hash, patch);
+function get_store(name, key) {
+	return cache.get('store:' + name + ':' + key);
 }
 
-function get_patch(old_hash, new_hash) {
-	return cache.get('patch:' + old_hash + ':' + new_hash);
+function set_store(name, key, store) {
+	return cache.set('store:' + name + ':' + key, store);
 }
 
-function get_patches(stores) {
-	return Promise.all(stores.map(function (store) {
-		return get_patch(store['old_hash'], store['new_hash']);
-	}));
+function get_hash(name, key) {
+	return cache.get('hash:' + name + ':' + key);
 }
 
-function get_store(hash) {
-	return cache.get('store:' + hash);
-}
-
-function set_store(hash, store) {
-	return cache.set('store:' + hash, store);
-}
-
-function get_hash(name) {
-	return cache.get('hash:' + name);
-}
-
-function set_hash(name, hash) {
-	return cache.set('hash:' + name, hash);
+function set_hash(name, key, hash) {
+	return cache.set('hash:' + name + ':' + key, hash);
 }
 
 function get_hashes(name) {
 	return Promise.all(store_keys.map(function (key) {
-		return get_hash(name + ':' + key)
+		return get_hash(name, key)
 			.then(function (hash) {
 				return {
-					store: key,
+					key: key,
 					hash: hash
 				};
 			});
@@ -67,9 +53,9 @@ function get_hashes(name) {
 
 function get_stores(name, keys) {
 	return Promise.all(keys.map(function (key) {
-		return get_hash(name + ':' + key)
+		return get_hash(name, key)
 			.then(function (hash) {
-				return get_store(hash)
+				return get_store(name, key)
 					.then(function (store) {
 						return {
 							key: key,
@@ -82,22 +68,19 @@ function get_stores(name, keys) {
 }
 
 function update_store(name, key, new_store) {
-	return get_hash(name + ':' + key)
+	return get_hash(name, key)
 		.then(function (old_hash) {
-			return get_store(old_hash)
+			return get_store(name, key)
 				.then(function (old_store) {
 					var patch = calculate_patch(old_store, new_store);
 					var new_hash = hash(new_store);
 
 					if (patch && new_hash !== old_hash) { /* if there was actually a change */
-						return store_patch(old_hash, new_hash, patch)
+						return set_hash(name, key, new_hash)
 							.then(function () {
-								return set_hash(name + ':' + key, new_hash)
+								return set_store(name, key, new_store)
 									.then(function () {
-										return set_store(new_hash, new_store)
-											.then(function () {
-												notify_channel(name, key, old_hash, new_hash, patch);
-											});
+										notify_channel(name, key, old_hash, new_hash, patch);
 									});
 							});
 					}
@@ -109,9 +92,9 @@ function init_stores(name) {
 	return Promise.all(store_keys.map(function (key) {
 		var new_hash = hash(default_store[key]);
 
-		return set_store(new_hash, default_store[key])
+		return set_store(name, key, default_store[key])
 			.then(function () {
-				return set_hash(name + ':' + key, new_hash);
+				return set_hash(name, key, new_hash);
 			});
 	}));
 }
@@ -138,6 +121,8 @@ function init_socket() {
 }
 
 function init_server(port) {
+	app.disable('etag');
+
 	app.get('/update_stores/:name', function (req, res) {
 		update_stores(req['params']['name'])
 		.then(function () {
@@ -169,7 +154,7 @@ function init_server(port) {
 	});
 
 	app.get('/store/:name/:key', function (req, res) {
-		get_stores(req['params']['name'], [key])
+		get_stores(req['params']['name'], [req['params']['key']])
 		.then(function (stores) {
 			res.send(stores);
 		})
@@ -177,17 +162,6 @@ function init_server(port) {
 			res.status(500).send({ error: err['stack'] });
 		});
 	});
-
-	app.get('/patch/:old_hash/:new_hash', function (req, res) {
-		get_patch(req['params']['old_hash'], req['params']['new_hash'])
-		.then(function (patch) {
-			res.send(patch);
-		})
-		.catch(function (err) {
-			res.status(500).send({ error: err['stack'] });
-		});
-	});
-
 
 	app.get('/', function (req, res) {
 	  res.sendFile(__dirname + '/index.html');

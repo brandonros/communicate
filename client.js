@@ -1,8 +1,7 @@
-var io = require('socket.io-client')({ transports: ['websocket'] });
-var diffpatcher = require('jsondiffpatch').create();
-var hash = require('object-hash');
-
-var cache = require('./cache');
+var io = require('socket.io-client')({ transports: ['websocket'] }); /* 170kb */
+var diffpatcher = require('jsondiffpatch').create(); /* 36kb */
+var hash = require('object-hash'); /* 500kb... */
+var localforage = require('localforage'); /* another 150kb or so */
 
 global.socket = null;
 
@@ -31,30 +30,82 @@ function init_socket() {
 		});
 
 		socket.on('reconnect', function () {
-			diff_stores();
+			reconnect();
 		});
 	});	
+}
+
+function reconnect() {
+	diff_stores()
+	.then(function () {
+		socket.emit('subscribe', { name: '1' });
+
+		console.log('Back up to date');
+	})
+	.catch(function (err) {
+		console.error(err);
+	});
 }
 
 function diff_stores() {
 	return get_json('http://localhost:9090/hashes/1')
 		.then(function (hashes_data) {
-			hashes_data.forEach(function (hash_data) {
-				console.log(hash_data);
-			});
+			return Promise.all(hashes_data.map(function (hash_data) {
+				var key = hash_data['store'];
+				var hash = hash_data['hash'];
+
+				if (hashes[key] !== hash) {
+					return retreive_store(key);
+				}
+			}));
 		});
 }
 
-function init_stores() {
+function load_stores() {
+	return get_json('http://localhost:9090/hashes/1')
+		.then(function (hashes_data) {
+			return Promise.all(hashes_data.map(function (hash_data) {
+				return Promise.all([
+					localforage.getItem('stores:' + hash_data['key']),
+					localforage.getItem('hashes:' + hash_data['key'])
+				])
+				.then(function (res) {
+					if (res[1] !== hash_data['hash']) {
+						return retreive_store(hash_data['key']);
+					}
+
+					stores[hash_data['key']] = res[0];
+					hashes[hash_data['key']] = res[1];
+				});
+			}));
+		});
+}
+
+function get_stores() {
 	return get_json('http://localhost:9090/stores/1')
 		.then(function (stores_data) {
-			stores_data.forEach(function (store_data) {
-				stores[store_data['key']] = store_data['store'];
-				hashes[store_data['key']] = store_data['hash'];
-			});
-
-			console.log('Got stores and hashes', stores, hashes);
+			return Promise.all(stores_data.map(function (store_data) {
+				return persist_store(store_data['key'], store_data['store'], store_data['hash']);
+			}));
 		});
+}
+
+function retreive_store(key) {
+	return get_json('http://localhost:9090/store/1/' + key)
+		.then(function (stores_data) {
+			return persist_store(key, stores_data[0]['store'], stores_data[0]['hash']);
+		});
+}
+
+function persist_store(key, store, hash) {
+	return Promise.all([
+		localforage.setItem('stores:' + key, store),
+		localforage.setItem('hashes:' + key, hash)
+	])
+	.then(function (res) {
+		stores[key] = res[0];
+		hashes[key] = res[1];
+	});
 }
 
 function patch_store(patch) {
@@ -62,28 +113,14 @@ function patch_store(patch) {
 	var old_hash = patch['old_hash'];
 	var new_hash = patch['new_hash'];
 
-	if (hashes[key] === old_hash) {
-		stores[key] = diffpatcher.patch(stores[key], patch['diff']);
-		hashes[key] = new_hash;
-
-		console.log('Patched ', key, stores[key], hashes[key]);
+	if (hashes[key] !== old_hash) { /* out of sync */
+		return retreive_store(key);
 	}
 
-	else { /* out of sync */
-		get_json('http://localhost:9090/store/1/' + key)
-		.then(function (stores_data) {
-			stores[key] = stores_data[0]['store'];
-			hashes[key] = stores_data[0]['hash'];
-
-			console.log('Re-retrieved ', key, stores[key], hashes[key]);
-		})
-		.catch(function (err) {
-			console.error(err['stack']);
-		});
-	}
+	return persist_store(key, diffpatcher.patch(stores[key], patch['diff']), new_hash);
 }
 
-init_stores()
+load_stores()
 .then(function () {
 	return init_socket();
 })
