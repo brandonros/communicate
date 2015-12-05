@@ -55,7 +55,7 @@ function diff_stores() {
 				var hash = hash_data['hash'];
 
 				if (hashes[key] !== hash) {
-					return retreive_store(key);
+					return retreive_stores([key]);
 				}
 			}));
 		});
@@ -64,20 +64,29 @@ function diff_stores() {
 function load_stores() {
 	return get_json('http://localhost:9090/hashes/1')
 		.then(function (hashes_data) {
-			return Promise.all(hashes_data.map(function (hash_data) {
-				return Promise.all([
-					localforage.getItem('stores:' + hash_data['key']),
-					localforage.getItem('hashes:' + hash_data['key'])
-				])
-				.then(function (res) {
-					if (res[1] !== hash_data['hash']) {
-						return retreive_store(hash_data['key']);
-					}
+			var mismatched_stores = [];
 
-					stores[hash_data['key']] = res[0];
-					hashes[hash_data['key']] = res[1];
-				});
-			}));
+			return Promise.all(hashes_data.map(function (hash_data) {
+				return localforage.getItem('hashes:' + hash_data['key'])
+					.then(function (local_hash) {
+						if (local_hash !== hash_data['hash']) {
+							mismatched_stores.push(hash_data['key']);
+						}
+
+						else {
+							return localforage.getItem('stores:' + hash_data['key'])
+								.then(function (store) {
+									stores[hash_data['key']] = store;
+									hashes[hash_data['key']] = local_hash;
+								});
+						}
+					});
+			}))
+			.then(function () {
+				if (mismatched_stores.length) {
+					return retreive_stores(mismatched_stores);
+				}
+			});
 		});
 }
 
@@ -90,10 +99,14 @@ function get_stores() {
 		});
 }
 
-function retreive_store(key) {
-	return get_json('http://localhost:9090/store/1/' + key)
+function retreive_stores(keys) {
+	var joined_keys = keys.join(',');
+
+	return get_json('http://localhost:9090/stores/1/' + keys.join(','))
 		.then(function (stores_data) {
-			return persist_store(key, stores_data[0]['store'], stores_data[0]['hash']);
+			return Promise.all(stores_data.map(function (store_data, index) {
+				return persist_store(keys[index], store_data['store'], store_data['hash']);
+			}));
 		});
 }
 
@@ -114,7 +127,7 @@ function patch_store(patch) {
 	var new_hash = patch['new_hash'];
 
 	if (hashes[key] !== old_hash) { /* out of sync */
-		return retreive_store(key);
+		return retreive_stores([key]);
 	}
 
 	return persist_store(key, diffpatcher.patch(stores[key], patch['diff']), new_hash);

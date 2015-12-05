@@ -153,8 +153,8 @@ function init_server(port) {
 		});
 	});
 
-	app.get('/store/:name/:key', function (req, res) {
-		get_stores(req['params']['name'], [req['params']['key']])
+	app.get('/stores/:name/:keys', function (req, res) {
+		get_stores(req['params']['name'], req['params']['keys'].split(','))
 		.then(function (stores) {
 			res.send(stores);
 		})
