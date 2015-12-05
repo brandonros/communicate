@@ -13,17 +13,10 @@ var default_store = {
 	customers: [{ id: 1, name: 'ronnie' }]
 };
 
-var updated_store = {
-	account: { id: 1, name: 'l2ol' },
-	items: [{ id: 1, name: 'extra lol' }],
-	balance: 3040,
-	customers: [{ id: 1, name: 'ronnie' }, { id: 2, name: 'jonnie' }]
-};
-
 var store_keys = ['account', 'items', 'balance', 'customers'];
 
-function notify_channel(channel, name, old_hash, new_hash, patch) {
-	io.to(channel).emit('patch', { name: name, old_hash: old_hash, new_hash: new_hash, patch: patch });
+function notify_channel(name, key, old_hash, new_hash, patch) {
+	io.to(name).emit('patch', { key: key, old_hash: old_hash, new_hash: new_hash, diff: patch });
 }
 
 function calculate_patch(old_store, new_store) {
@@ -60,8 +53,8 @@ function set_hash(name, hash) {
 	return cache.set('hash:' + name, hash);
 }
 
-function get_hashs(name) {
-	return Promise.all(Object.keys(default_store).map(function (key) {
+function get_hashes(name) {
+	return Promise.all(store_keys.map(function (key) {
 		return get_hash(name + ':' + key)
 			.then(function (hash) {
 				return {
@@ -72,8 +65,8 @@ function get_hashs(name) {
 	}));
 }
 
-function get_stores(name) {
-	return Promise.all(Object.keys(default_store).map(function (key) {
+function get_stores(name, keys) {
+	return Promise.all(keys.map(function (key) {
 		return get_hash(name + ':' + key)
 			.then(function (hash) {
 				return get_store(hash)
@@ -124,18 +117,27 @@ function init_stores(name) {
 }
 
 function update_stores(name) {
+	var updated_store = {
+		account: { id: 1, name: 'l2ol' },
+		items: [{ id: 1, name: 'extra lol' }],
+		balance: Math.random(),
+		customers: [{ id: 1, name: 'ronnie' }, { id: 2, name: 'jonnie' }]
+	};
+
 	return Promise.all(store_keys.map(function (key) {
 		return update_store(name, key, updated_store[key])
 	}));
 }
 
-function init_server(port) {
+function init_socket() {
 	io.on('connection', function (socket) {
 		socket.on('subscribe', function (data) {
-			socket.join(data['channel']);
+			socket.join(data['name']);
 		});
 	});
+}
 
+function init_server(port) {
 	app.get('/update_stores/:name', function (req, res) {
 		update_stores(req['params']['name'])
 		.then(function () {
@@ -147,7 +149,7 @@ function init_server(port) {
 	});
 
 	app.get('/hashes/:name', function (req, res) {
-		get_hashs(req['params']['name'])
+		get_hashes(req['params']['name'])
 		.then(function (hashes) {
 			res.send(hashes);
 		})
@@ -157,7 +159,17 @@ function init_server(port) {
 	});
 
 	app.get('/stores/:name', function (req, res) {
-		get_stores(req['params']['name'])
+		get_stores(req['params']['name'], store_keys)
+		.then(function (stores) {
+			res.send(stores);
+		})
+		.catch(function (err) {
+			res.status(500).send({ error: err['stack'] });
+		});
+	});
+
+	app.get('/store/:name/:key', function (req, res) {
+		get_stores(req['params']['name'], [key])
 		.then(function (stores) {
 			res.send(stores);
 		})
@@ -176,11 +188,21 @@ function init_server(port) {
 		});
 	});
 
-	app.listen(port);
+
+	app.get('/', function (req, res) {
+	  res.sendFile(__dirname + '/index.html');
+	});
+
+	app.get('/bundle.js', function (req, res) {
+	  res.sendFile(__dirname + '/bundle.js');
+	});
+
+	server.listen(port);
 }
 
 init_stores('1')
 .then(function () {
+	init_socket();
 	init_server(9090);	
 
 	console.log('Listening...');
