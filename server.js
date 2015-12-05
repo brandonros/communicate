@@ -1,94 +1,178 @@
-var app = require('express').createServer();
-var io = require('socket.io')(app);
+var app = require('express')();
+var server = require('http').Server(app);
+var io = require('socket.io')(server);
 var diffpatcher = require('jsondiffpatch').create();
-var cache = require('memory-cache');
-var uuid = require('uuid');
+var hash = require('object-hash');
 
-function notify_channel(channel, name, old_version, new_version, patch) {
-	io.to(channel).emit('patch', { name: name, old_version: old_version, new_version: new_version, patch: patch });
+var cache = require('./cache');
+
+var default_store = {
+	account: { id: 1, name: 'lol' },
+	items: [{ id: 1, name: 'extra lol' }],
+	balance: 300,
+	customers: [{ id: 1, name: 'ronnie' }]
+};
+
+var updated_store = {
+	account: { id: 1, name: 'l2ol' },
+	items: [{ id: 1, name: 'extra lol' }],
+	balance: 3040,
+	customers: [{ id: 1, name: 'ronnie' }, { id: 2, name: 'jonnie' }]
+};
+
+var store_keys = ['account', 'items', 'balance', 'customers'];
+
+function notify_channel(channel, name, old_hash, new_hash, patch) {
+	io.to(channel).emit('patch', { name: name, old_hash: old_hash, new_hash: new_hash, patch: patch });
 }
 
 function calculate_patch(old_store, new_store) {
-	return diffpatcher(old_store, new_store);
+	return diffpatcher.diff(old_store, new_store);
 }
 
-function store_patch(old_store, old_version, new_store, new_version) {
-	var patch = calculate_patch(old_store, new_store);
-
-	return cache.set('patch:' + old_version + ':' + new_version, patch);
+function store_patch(old_hash, new_hash, patch) {
+	return cache.set('patch:' + old_hash + ':' + new_hash, patch);
 }
 
-function get_patch(old_version, new_version) {
-	return cache.get('patch:' + old_version + ':' + new_version);
+function get_patch(old_hash, new_hash) {
+	return cache.get('patch:' + old_hash + ':' + new_hash);
 }
 
 function get_patches(stores) {
 	return Promise.all(stores.map(function (store) {
-		return get_patch(store['old_version'], store['new_version']);
+		return get_patch(store['old_hash'], store['new_hash']);
 	}));
 }
 
-function get_store(version) {
-	return cache.get('store:' + version);
+function get_store(hash) {
+	return cache.get('store:' + hash);
 }
 
-function set_store(version, store) {
-	return cache.set('store:' + version, store);
+function set_store(hash, store) {
+	return cache.set('store:' + hash, store);
 }
 
-function get_version(name) {
-	return cache.get('version:' + name);
+function get_hash(name) {
+	return cache.get('hash:' + name);
 }
 
-function set_version(name, version) {
-	return cache.set('version:' + name, version);
+function set_hash(name, hash) {
+	return cache.set('hash:' + name, hash);
 }
 
-function get_versions(names) {
-	return Promise.all(names.map(function (name) {
-		return get_version(name);
+function get_hashs(name) {
+	return Promise.all(Object.keys(default_store).map(function (key) {
+		return get_hash(name + ':' + key)
+			.then(function (hash) {
+				return {
+					store: key,
+					hash: hash
+				};
+			});
 	}));
 }
 
-function update_store(channel, name, new_store) {
-	return get_version(name)
-		.then(function (old_version) {
-			return get_store(old_version)
+function get_stores(name) {
+	return Promise.all(Object.keys(default_store).map(function (key) {
+		return get_hash(name + ':' + key)
+			.then(function (hash) {
+				return get_store(hash)
+					.then(function (store) {
+						return {
+							key: key,
+							store: store,
+							hash: hash
+						};
+					});
+			});
+	}));
+}
+
+function update_store(name, key, new_store) {
+	return get_hash(name + ':' + key)
+		.then(function (old_hash) {
+			return get_store(old_hash)
 				.then(function (old_store) {
 					var patch = calculate_patch(old_store, new_store);
-					var new_version = uuid.v4();
+					var new_hash = hash(new_store);
 
-					return store_patch(old_store, old_store, new_store, new_version)
-						.then(function () {
-							return set_version(name, new_version);
-								.then(function () {
-									send_to_channel(channel, name, old_version, new_version, patch);
-								});
-						});
+					if (patch && new_hash !== old_hash) { /* if there was actually a change */
+						return store_patch(old_hash, new_hash, patch)
+							.then(function () {
+								return set_hash(name + ':' + key, new_hash)
+									.then(function () {
+										return set_store(new_hash, new_store)
+											.then(function () {
+												notify_channel(name, key, old_hash, new_hash, patch);
+											});
+									});
+							});
+					}
 				});
 		});
 }
 
 function init_stores(name) {
-	var store = {
-		account: { id: 1, name: 'lol' },
-		items: [{ id: 1, name: 'extra lol' }],
-		balance: 300,
-		customers: [{ id: 1, name: 'ronnie' }]
-	};
+	return Promise.all(store_keys.map(function (key) {
+		var new_hash = hash(default_store[key]);
 
-	var version = uuid.v4();
+		return set_store(new_hash, default_store[key])
+			.then(function () {
+				return set_hash(name + ':' + key, new_hash);
+			});
+	}));
+}
 
-	return set_store(verion, store)
-		.then(function () {
-			return set_version(name, version);
-		});
+function update_stores(name) {
+	return Promise.all(store_keys.map(function (key) {
+		return update_store(name, key, updated_store[key])
+	}));
 }
 
 function init_server(port) {
 	io.on('connection', function (socket) {
 		socket.on('subscribe', function (data) {
 			socket.join(data['channel']);
+		});
+	});
+
+	app.get('/update_stores/:name', function (req, res) {
+		update_stores(req['params']['name'])
+		.then(function () {
+			res.send({ success: true });
+		})
+		.catch(function (err) {
+			res.status(500).send({ error: err['stack'] });
+		});
+	});
+
+	app.get('/hashes/:name', function (req, res) {
+		get_hashs(req['params']['name'])
+		.then(function (hashes) {
+			res.send(hashes);
+		})
+		.catch(function (err) {
+			res.status(500).send({ error: err['stack'] });
+		});
+	});
+
+	app.get('/stores/:name', function (req, res) {
+		get_stores(req['params']['name'])
+		.then(function (stores) {
+			res.send(stores);
+		})
+		.catch(function (err) {
+			res.status(500).send({ error: err['stack'] });
+		});
+	});
+
+	app.get('/patch/:old_hash/:new_hash', function (req, res) {
+		get_patch(req['params']['old_hash'], req['params']['new_hash'])
+		.then(function (patch) {
+			res.send(patch);
+		})
+		.catch(function (err) {
+			res.status(500).send({ error: err['stack'] });
 		});
 	});
 
